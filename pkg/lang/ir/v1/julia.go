@@ -33,6 +33,12 @@ const (
 //go:embed julia.sh
 var downloadJuliaBashScript string
 
+//go:embed julia_registry.jl
+var juliaLocalRegistry string
+
+//go:embed julia_pkg_server.jl
+var juliaLocalServerConfig string
+
 // getJuliaBinary returns the llb.State only after setting up Julia environment
 // A successful run of getJuliaBinary should set up the Julia environment
 func (g generalGraph) getJuliaBinary(root llb.State) llb.State {
@@ -60,8 +66,43 @@ func (g *generalGraph) installJulia(root llb.State) llb.State {
 
 	confJulia := g.getJuliaBinary(root)
 	confJulia = g.updateEnvPath(confJulia, juliaBinDir)
+	finishJuliaConfig := g.configJuliaCache(confJulia)
 
-	return confJulia
+	return finishJuliaConfig
+}
+
+func (g *generalGraph) configJuliaCache(root llb.State) llb.State {
+
+	installGit := root.
+		Run(llb.Shlexf("apt-get install -y git"),
+			llb.WithCustomName("[internal] installing Git")).Root()
+	configGit := installGit.
+		Run(llb.Shlexf("git config --global user.email 'julia@pkgserver.com'"),
+			llb.WithCustomName("[internal] config Git user email for Julia package registry")).
+		Run(llb.Shlexf("git config --global user.name 'JuliaPkgServer'"),
+			llb.WithCustomName("[internal] config Git user name for Julia package registry")).Root()
+
+	installJuliaPkgServer := configGit.
+		Run(llb.Shlexf(`julia -e 'using Pkg; Pkg.add("LocalPackageServer"); Pkg.add("LocalRegistry"); Pkg.instantiate()'`),
+			llb.WithCustomName("[internal] installing Julia local package server")).Root()
+
+	copyJuliaConfFile := installJuliaPkgServer.
+		File(llb.Mkdir("/opt/juliaPkg/", 0755, llb.WithParents(true)),
+			llb.WithCustomName("[internal] creating folder for julia pkg server")).
+		File(llb.Mkfile("/opt/juliaPkg/julia_registry.jl", 0755, []byte(juliaLocalRegistry)),
+			llb.WithCustomName("[internal] creating Julia registry file")).
+		File(llb.Mkfile("/opt/juliaPkg/julia_pkg_server.jl", 0755, []byte(juliaLocalServerConfig)),
+			llb.WithCustomName("[internal] creating Julia pkg server file"))
+
+	g.UserDirectories = append(g.UserDirectories, "/opt/juliaPkg/")
+
+	startJuliaCacheServer := copyJuliaConfFile.
+		Run(llb.Shlexf("julia /opt/juliaPkg/julia_registry.jl"),
+			llb.WithCustomName("[internal] starting Julia cache server #1")).
+		Run(llb.Shlexf("nohup julia /opt/juliaPkg/julia_pkg_server.jl > output 2>&1 &"),
+			llb.WithCustomName("[internal] starting Julia cache server #2")).Root()
+
+	return startJuliaCacheServer
 }
 
 // installJuliaPackages returns the llb.State only after installing required Julia packages
@@ -83,6 +124,11 @@ func (g *generalGraph) installJuliaPackages(root llb.State) llb.State {
 
 	// Export "/opt/julia/user_packages" as the additional library path for users
 	g.RuntimeEnviron["JULIA_DEPOT_PATH"] = juliaPkgDir
+
+	root = root.AddEnv("JULIA_PKG_SERVER", "http://127.0.0.1:9999")
+	g.RuntimeEnviron["JULIA_PKG_SERVER"] = "http://127.0.0.1:9999"
+	root = root.
+		Run(llb.Shlex(`julia -e 'using Pkg; pkg"registry add "'`), llb.WithCustomNamef("[internal] updating Julia registries")).Root()
 
 	// Change owner of the "/opt/julia/user_packages" to users
 	g.UserDirectories = append(g.UserDirectories, juliaPkgDir)
