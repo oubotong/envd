@@ -99,7 +99,7 @@ func (g *generalGraph) configJuliaCache(root llb.State) llb.State {
 	startJuliaCacheServer := copyJuliaConfFile.
 		Run(llb.Shlexf("julia /opt/juliaPkg/julia_registry.jl"),
 			llb.WithCustomName("[internal] starting Julia cache server #1")).
-		Run(llb.Shlexf("nohup julia /opt/juliaPkg/julia_pkg_server.jl > output 2>&1 &"),
+		Run(llb.Shlexf("julia /opt/juliaPkg/julia_pkg_server.jl &"),
 			llb.WithCustomName("[internal] starting Julia cache server #2")).Root()
 
 	return startJuliaCacheServer
